@@ -218,4 +218,25 @@ jobs:
       - name: Upload APK to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "app-v${{ steps.version.outputs.app_version }}" vega-tv-android.apk --clobber
+        shell: bash
+        run: |
+          TAG="app-v${{ steps.version.outputs.app_version }}"
+          echo "Target release tag: $TAG"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG not found yet. Creating draft release with APK..."
+            gh release create "$TAG" vega-tv-android.apk \
+              --title "Vega v${{ steps.version.outputs.app_version }}" \
+              --notes "Automated release of Vega." \
+              --draft
+          else
+            echo "Release $TAG exists. Uploading vega-tv-android.apk..."
+            for attempt in {1..6}; do
+              if gh release upload "$TAG" vega-tv-android.apk --clobber; then
+                echo "Successfully uploaded APK!"
+                break
+              fi
+              echo "Upload attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
