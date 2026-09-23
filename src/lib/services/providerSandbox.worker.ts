@@ -100,34 +100,66 @@ const serializeBody = async (body: BodyInit | null | undefined) => {
   };
 };
 
+const headerEntries = (source: unknown): Array<[string, string]> => {
+  const entries: Array<[string, string]> = [];
+  if (!source) return entries;
+  if (typeof (source as Headers).forEach === "function") {
+    (source as Headers).forEach((value, key) => entries.push([key, value]));
+    return entries;
+  }
+  if (Array.isArray(source)) {
+    for (const pair of source) {
+      if (Array.isArray(pair) && pair.length >= 2 && pair[0] && pair[1] != null) {
+        entries.push([String(pair[0]), String(pair[1])]);
+      }
+    }
+    return entries;
+  }
+  if (typeof source === "object") {
+    for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+      if (value != null) {
+        entries.push([key, String(value)]);
+      }
+    }
+  }
+  return entries;
+};
+
 const sandboxFetch = async (
   input: RequestInfo | URL,
   init: RequestInit = {},
-): Promise<Response> => {
+): Promise<Response & { rawHeaders?: Array<[string, string]> }> => {
   const request = input instanceof Request ? input : undefined;
   const url = request?.url ?? input.toString();
-  const headers = new Headers(request?.headers);
-  new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  const mergedHeaders: Array<[string, string]> = [
+    ...headerEntries(request?.headers),
+    ...headerEntries(init.headers),
+  ];
   const serializedBody = await serializeBody(init.body);
-  if (serializedBody.contentType && !headers.has("content-type")) {
-    headers.set("Content-Type", serializedBody.contentType);
+  if (
+    serializedBody.contentType &&
+    !mergedHeaders.some(([k]) => k.toLowerCase() === "content-type")
+  ) {
+    mergedHeaders.push(["Content-Type", serializedBody.contentType]);
   }
 
   const response = await rpc<SerializedResponse>("fetch", {
     url,
     init: {
       method: init.method ?? request?.method,
-      headers: Array.from(headers.entries()),
+      headers: mergedHeaders,
       body: serializedBody.data,
       redirect: init.redirect,
     },
   });
 
-  return new Response(response.data, {
+  const res = new Response(response.data, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
-  });
+  }) as Response & { rawHeaders?: Array<[string, string]> };
+  res.rawHeaders = response.headers;
+  return res;
 };
 
 const sandboxAxiosAdapter: AxiosAdapter = async (config) => {
@@ -151,6 +183,26 @@ const sandboxAxiosAdapter: AxiosAdapter = async (config) => {
   });
   const responseHeaders = new AxiosHeaders();
   response.headers.forEach((value, key) => responseHeaders.set(key, value));
+
+  const rawHeaders = (response as any).rawHeaders as Array<[string, string]> | undefined;
+  if (rawHeaders) {
+    const setCookies: string[] = [];
+    for (const [key, value] of rawHeaders) {
+      if (key.toLowerCase() === "set-cookie" || key.toLowerCase() === "x-set-cookie") {
+        setCookies.push(value);
+      }
+    }
+    if (setCookies.length > 0) {
+      responseHeaders.set("set-cookie", setCookies);
+      responseHeaders.set("x-set-cookie", setCookies);
+    }
+  } else {
+    const xSetCookie = response.headers.get("x-set-cookie");
+    if (xSetCookie) {
+      responseHeaders.set("set-cookie", xSetCookie);
+      responseHeaders.set("x-set-cookie", xSetCookie);
+    }
+  }
 
   let data: unknown;
   if (config.responseType === "arraybuffer") {

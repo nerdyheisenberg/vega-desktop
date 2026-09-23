@@ -86,30 +86,46 @@ export async function providerFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const url = input instanceof Request ? input.url : input.toString();
-  const requestHeaders = new Headers();
-  new Headers(init.headers).forEach((value, key) => {
-    requestHeaders.set(key, value);
-  });
 
+  const plainHeaders: Record<string, string> = {};
+  if (Array.isArray(init.headers)) {
+    for (const pair of init.headers) {
+      if (Array.isArray(pair) && pair.length >= 2 && pair[0] && pair[1] != null) {
+        plainHeaders[String(pair[0])] = String(pair[1]);
+      }
+    }
+  } else if (init.headers && typeof init.headers.forEach === "function") {
+    init.headers.forEach((value, key) => {
+      plainHeaders[key] = value;
+    });
+  } else if (init.headers && typeof init.headers === "object") {
+    for (const [key, value] of Object.entries(init.headers)) {
+      if (value != null) {
+        plainHeaders[key] = String(value);
+      }
+    }
+  }
+
+  const hasCookieHeader = Object.keys(plainHeaders).some(
+    (k) => k.toLowerCase() === "cookie"
+  );
   const globalCookies = getGlobalCookies(url);
-  if (globalCookies && !requestHeaders.has("cookie")) {
-    requestHeaders.set("Cookie", globalCookies);
+  if (globalCookies && !hasCookieHeader) {
+    plainHeaders["Cookie"] = globalCookies;
   }
 
   let body: number[] | undefined;
   if (init.body != null) {
     const serializedBody = new Response(init.body);
     const generatedContentType = serializedBody.headers.get("content-type");
-    if (generatedContentType && !requestHeaders.has("content-type")) {
-      requestHeaders.set("Content-Type", generatedContentType);
+    const hasContentType = Object.keys(plainHeaders).some(
+      (k) => k.toLowerCase() === "content-type"
+    );
+    if (generatedContentType && !hasContentType) {
+      plainHeaders["Content-Type"] = generatedContentType;
     }
     body = Array.from(new Uint8Array(await serializedBody.arrayBuffer()));
   }
-
-  const plainHeaders: Record<string, string> = {};
-  requestHeaders.forEach((value, key) => {
-    plainHeaders[key] = value;
-  });
   const response: {
     status: number;
     status_text: string;
@@ -128,9 +144,14 @@ export async function providerFetch(
     },
   });
 
-  const headerEntries = response.headers.map(
-    ([key, value]) => [key.toLowerCase(), value] as const,
-  );
+  const headerEntries: Array<[string, string]> = [];
+  for (const [key, value] of response.headers) {
+    const lowerKey = key.toLowerCase();
+    headerEntries.push([lowerKey, value]);
+    if (lowerKey === "set-cookie") {
+      headerEntries.push(["x-set-cookie", value]);
+    }
+  }
   const responseData = new Uint8Array(response.data);
   const responseHeaders = {
     get(name: string) {
