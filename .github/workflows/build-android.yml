@@ -84,9 +84,58 @@ jobs:
           VITE_TV_MODE: "true"
         run: npm run tauri android build -- --apk --target aarch64 --target armv7
 
-      - name: Upload unsigned APK as artifact
+      - name: Sign APK
+        run: |
+          # 1. Generate release keystore
+          keytool -genkeypair -v \
+            -keystore release.jks \
+            -alias vega-key \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Vega, OU=VegaTV, O=Vega, L=Unknown, ST=Unknown, C=US"
+
+          # 2. Get the largest unsigned APK path
+          UNSIGNED_APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-unsigned.apk" | xargs ls -S | head -n 1)
+          echo "Found unsigned APK: $UNSIGNED_APK"
+
+          # 3. Locate the latest Android Build Tools on the GitHub Runner
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          echo "Using Android build tools from: $BUILD_TOOLS"
+
+          # 4. Zipalign it
+          $BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" app-aligned.apk
+
+          # 5. Sign it with v1, v2, and v3 scheme
+          $BUILD_TOOLS/apksigner sign \
+            --ks release.jks \
+            --ks-key-alias "vega-key" \
+            --ks-pass pass:"android" \
+            --key-pass pass:"android" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out vega-tv-android.apk \
+            app-aligned.apk
+
+          # 6. Verify signature
+          $BUILD_TOOLS/apksigner verify --verbose vega-tv-android.apk
+
+      - name: Upload signed APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vega-tv-android-unsigned
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: vega-tv-android-signed
+          path: vega-tv-android.apk
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete bravia-tv-fix --yes --cleanup-tag 2>/dev/null || true
+          gh release create bravia-tv-fix vega-tv-android.apk \
+            --title "Vega Android TV (Bravia Fix)" \
+            --notes "Vega TV build with fixes for Sony Bravia remote freeze and screensaver during playback. Pre-aligned and signed APK ready to install on Android TV."
+
